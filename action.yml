@@ -193,7 +193,7 @@ runs:
 
     - name: Comment on PR
       if: github.event_name == 'pull_request' && inputs.disable-pr-comment != 'true' && inputs.github-token != ''
-      uses: actions/github-script@v8
+      uses: actions/github-script@v9
       env:
         REVIEW_SCRIPT: ${{ github.action_path }}/scripts/comment.js
         REVIEW_BODY: ${{ steps.analysis.outputs.analysis-result }}

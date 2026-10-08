@@ -222,7 +222,7 @@ jobs:
           pattern: multicloud-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: analyses
       - name: Publish combined review
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           REVIEW_SCRIPT: ${{ github.workspace }}/scripts/comment.js
         with:
@@ -268,7 +268,7 @@ jobs:
           name: domain-comprehensive-${{ github.run_id }}-${{ github.run_attempt }}
           path: comprehensive
       - name: Publish comprehensive review
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           REVIEW_SCRIPT: ${{ github.workspace }}/scripts/comment.js
         with:
@@ -307,7 +307,7 @@ jobs:
           pattern: capability-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: capabilities
       - name: Publish capability review
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           REVIEW_SCRIPT: ${{ github.workspace }}/scripts/comment.js
         with:
