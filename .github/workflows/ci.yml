@@ -14,7 +14,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
@@ -58,7 +58,7 @@ jobs:
             name: Other providers
             plan: examples/terraform-plan-json/large_other_plan.json
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Run rich review
         uses: ./
         with:
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: multi-cloud-review
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Run domain comprehensive review
         uses: ./
         with:
@@ -180,7 +180,7 @@ jobs:
             style: severity
             timeout: '120'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Run capability review
         uses: ./
         with:
@@ -214,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, multi-cloud-review]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Download reviews
         continue-on-error: true
         uses: actions/download-artifact@v8
@@ -260,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [domain-comprehensive-review]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Download comprehensive review
         continue-on-error: true
         uses: actions/download-artifact@v8
@@ -299,7 +299,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, capability-review]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Download capability reviews
         continue-on-error: true
         uses: actions/download-artifact@v8
