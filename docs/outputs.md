@@ -6,7 +6,7 @@ Add an `id` to the action step to use its outputs:
 
 ```yaml
 - id: terraform-review
-  uses: thomast1906/terraform-ai-review-action@<commit-sha>
+  uses: thomast1906/terraform-review-ai-action@<commit-sha>
   with:
     foundry-api-key: ${{ secrets.FOUNDRY_API_KEY }}
     foundry-endpoint: ${{ secrets.FOUNDRY_ENDPOINT }}
@@ -62,3 +62,5 @@ Upload these files to keep the reports after a workflow run:
 | `critical` | Only critical findings fail the action. |
 
 The action writes the report and summary before the gate runs. Set `if: always()` on artifact upload steps to keep reports when a gate fails.
+
+The gate uses the highest severity from the original batch reports and the final report. A final report cannot lower the gate severity. If consolidation omits or lowers a batch finding, the Markdown report includes a notice.
