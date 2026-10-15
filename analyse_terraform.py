@@ -747,18 +747,8 @@ class TerraformAnalyser:
         if not os.path.exists(self.config.terraform_plan_path):
             raise ValueError(f"Terraform plan file not found: {self.config.terraform_plan_path}")
         
-        # Validate plan file is valid JSON with correct format
-        try:
-            with open(self.config.terraform_plan_path, 'r') as f:
-                plan = json.load(f)
-                if 'format_version' not in plan:
-                    raise ValueError(
-                        "Invalid Terraform plan format: missing 'format_version' field. "
-                        "Ensure you're using 'terraform show -json' output."
-                    )
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in Terraform plan file: {e}")
-        
+        self._load_terraform_plan()
+
         # Validate analysis preset if provided
         allowed_presets = ['security-audit', 'cost-optimisation', 'production-ready', 
                           'quick-check', 'complete', '']
@@ -786,6 +776,32 @@ class TerraformAnalyser:
             )
         
         print("✅ Input validation passed")
+
+    def _load_terraform_plan(self) -> Dict[str, Any]:
+        """Load plan evidence, rejecting state JSON and failed plans."""
+        try:
+            with open(self.config.terraform_plan_path, 'r', encoding='utf-8') as f:
+                plan = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in Terraform plan file: {e}") from e
+
+        if not isinstance(plan, dict) or 'format_version' not in plan:
+            raise ValueError(
+                "Invalid Terraform plan format: expected an object with 'format_version'. "
+                "Use 'terraform show -json' on a saved plan."
+            )
+        if 'values' in plan or not any(key in plan for key in ('planned_values', 'resource_changes')):
+            raise ValueError(
+                "Invalid Terraform plan: expected plan evidence, not state JSON. "
+                "Use 'terraform show -json' on a saved plan."
+            )
+        if plan.get('errored') is True:
+            raise ValueError("Terraform plan failed (errored=true); generate a successful plan before review.")
+        if 'resource_changes' in plan and not isinstance(plan['resource_changes'], list):
+            raise ValueError("Invalid Terraform plan: 'resource_changes' must be an array.")
+        if 'planned_values' in plan and not isinstance(plan['planned_values'], dict):
+            raise ValueError("Invalid Terraform plan: 'planned_values' must be an object.")
+        return plan
     
     def _scrub_sensitive_data(self, data: str) -> str:
         """Redact sensitive data patterns before sending to AI (CWE-200 mitigation)
@@ -860,60 +876,115 @@ class TerraformAnalyser:
         max_total_size = int(os.environ.get('MAX_TOTAL_SIZE_MB', '50')) * 1_000_000  # Default 50MB total
         max_files = int(os.environ.get('MAX_FILES', '100'))  # Default 100 files
 
-        total_size = 0
-        file_count = 0
-
         # Read all .tf files in the specified directory (already validated), in
         # sorted order so the included file set is deterministic
         tf_pattern = os.path.join(self.config.terraform_directory, "**/*.tf")
+        validated_files = []
+        path_validation_failures = 0
+        size_lookup_failures = 0
 
         for tf_file in sorted(glob.glob(tf_pattern, recursive=True)):
             # Skip hidden files
             if os.path.basename(tf_file).startswith('.'):
                 continue
             
-            # Check file count limit
-            if file_count >= max_files:
-                print(f"Warning: Reached maximum file limit ({max_files}), skipping remaining files", file=sys.stderr)
-                break
-            
             # Validate file is within allowed directory (extra safety check)
             try:
                 validated_path = self._validate_path(tf_file, self.config.terraform_directory)
-            except ValueError as e:
-                print(f"Warning: Skipping file due to path validation: {e}", file=sys.stderr)
+            except ValueError:
+                path_validation_failures += 1
                 continue
             
             # Check file size
             try:
                 file_size = os.path.getsize(validated_path)
-            except OSError as e:
-                print(f"Warning: Could not get size of {tf_file}: {e}", file=sys.stderr)
+            except OSError:
+                size_lookup_failures += 1
                 continue
-            
-            # Skip files that are too large
-            if file_size > max_file_size:
-                print(f"Warning: Skipping large file: {tf_file} ({file_size} bytes exceeds {max_file_size} limit)", file=sys.stderr)
-                continue
-            
-            # Check total size limit
+
+            rel_path = os.path.relpath(
+                validated_path, os.path.realpath(self.config.terraform_directory)
+            )
+            validated_files.append((tf_file, validated_path, rel_path, file_size))
+
+        if path_validation_failures or size_lookup_failures:
+            def _format_preflight_failure(count: int, label: str) -> str:
+                noun = "file" if count == 1 else "files"
+                return f"{count} {noun} {label}"
+
+            failure_messages = []
+            if path_validation_failures:
+                failure_messages.append(
+                    _format_preflight_failure(path_validation_failures, "could not be validated")
+                )
+            if size_lookup_failures:
+                failure_messages.append(
+                    _format_preflight_failure(size_lookup_failures, "could not be sized")
+                )
+
+            raise RuntimeError(
+                "Terraform source selection failed: " + "; ".join(failure_messages)
+            )
+
+        validated_selection = [
+            (rel_path, validated_path, file_size)
+            for tf_file, validated_path, rel_path, file_size in validated_files
+        ]
+
+        omitted_by_file_size = sum(
+            1 for _, _, _, file_size in validated_files if file_size > max_file_size
+        )
+
+        eligible_files = [
+            item for item in validated_selection
+            if item[2] <= max_file_size
+        ]
+
+        omitted_by_file_count = max(0, len(eligible_files) - max_files)
+
+        omitted_by_total_size = 0
+        total_size = 0
+        for index, (rel_path, validated_path, file_size) in enumerate(eligible_files):
             if total_size + file_size > max_total_size:
-                print(f"Warning: Reached total size limit ({max_total_size} bytes), skipping remaining files", file=sys.stderr)
+                omitted_by_total_size = len(eligible_files) - index
                 break
-            
-            # Read file
+            total_size += file_size
+
+        if omitted_by_file_size or omitted_by_total_size or omitted_by_file_count:
+            def _format_limit(count: int, label: str) -> str:
+                noun = "file" if count == 1 else "files"
+                return f"{count} {noun} {label}"
+
+            messages = []
+            if omitted_by_file_count:
+                messages.append(_format_limit(omitted_by_file_count, "would be omitted by the file count limit"))
+            if omitted_by_total_size:
+                messages.append(_format_limit(omitted_by_total_size, "would be omitted by the total size limit"))
+            if omitted_by_file_size:
+                messages.append(_format_limit(omitted_by_file_size, "would be omitted by the individual file size limit"))
+
+            raise RuntimeError(
+                "Terraform source selection exceeded limits: " + "; ".join(messages)
+            )
+
+        # Read files only after all selection limits have been validated.
+        read_failures = 0
+        for rel_path, validated_path, file_size in validated_selection:
             try:
                 with open(validated_path, 'r', encoding='utf-8') as f:
-                    rel_path = os.path.relpath(
-                        validated_path, os.path.realpath(self.config.terraform_directory)
-                    )
                     all_tf_files[rel_path] = f.read()
-                    total_size += file_size
-                    file_count += 1
-            except Exception as e:
-                print(f"Warning: Could not read {tf_file}: {e}", file=sys.stderr)
-        
-        print(f"Read {file_count} Terraform files ({total_size} bytes total)")
+            except Exception:
+                read_failures += 1
+
+        if read_failures:
+            noun = "file" if read_failures == 1 else "files"
+            raise RuntimeError(
+                f"Terraform source selection failed: {read_failures} selected {noun} could not be read"
+            )
+
+        selected_file_count = len(validated_selection)
+        selected_total_size = sum(file_size for _, _, file_size in validated_selection)
+        print(f"Read {selected_file_count} Terraform files ({selected_total_size} bytes total)")
 
         return all_tf_files
     
@@ -968,7 +1039,9 @@ class TerraformAnalyser:
     def create_analysis_prompt(self, tf_files: Dict[str, str], changed_files: Dict[str, str],
                              plan_changes: List[Dict], resource_types: List[str],
                              action_counts: Dict[str, int], providers: List[str],
-                             mcp_insights: Optional[Dict[str, Any]] = None) -> str:
+                             mcp_insights: Optional[Dict[str, Any]] = None,
+                             source_context_note: Optional[str] = None,
+                             plan_context_note: Optional[str] = None) -> str:
         """Create the analysis prompt for OpenAI with optional MCP insights integration and data scrubbing
 
         `plan_changes` is expected to be a list of changes already normalised by
@@ -990,9 +1063,12 @@ class TerraformAnalyser:
         else:
             context_description = "This comprehensive analysis reviews both the Terraform plan and the overall configuration."
             tf_context = "### Terraform Configuration:\n\n"
-            for filepath, content in sorted(tf_files.items()):
-                scrubbed_content = self._scrub_sensitive_data(content)
-                tf_context += f"**{filepath}:**\n```hcl\n{scrubbed_content}\n```\n\n"
+            if tf_files:
+                for filepath, content in sorted(tf_files.items()):
+                    scrubbed_content = self._scrub_sensitive_data(content)
+                    tf_context += f"**{filepath}:**\n```hcl\n{scrubbed_content}\n```\n\n"
+            elif source_context_note:
+                tf_context += f"{source_context_note}\n\n"
 
         # Format plan changes
         plan_summary = f"### Plan Summary:\n"
@@ -1004,7 +1080,10 @@ class TerraformAnalyser:
         plan_text = "### Detailed Plan Changes:\n\n"
         plan_text += "Evidence limits: only included changes and source files may support findings\n\n"
         if not plan_changes:
-            plan_text += "No resource changes detected in the plan.\n\n"
+            if plan_context_note:
+                plan_text += f"{plan_context_note}\n\n"
+            else:
+                plan_text += "No resource changes detected in the plan.\n\n"
         else:
             for change in plan_changes:
                 plan_text += f"**Action:** {change['action']}\n"
@@ -1142,15 +1221,81 @@ For each finding:
 Be practical and specific rather than generic. Focus on actionable insights that will genuinely help improve the infrastructure.
 """
 
-    def build_prompt_batches(self, tf_files: Dict[str, str], plan_changes: List[Dict],
-                             resource_types: List[str], action_counts: Dict[str, int],
-                             providers: List[str], mcp_insights: Dict[str, Any]) -> List[str]:
+    def _build_source_prompt_batches(self, tf_files: Dict[str, str],
+                                     resource_types: List[str], action_counts: Dict[str, int],
+                                     providers: List[str], mcp_insights: Dict[str, Any],
+                                     plan_context_note: Optional[str]) -> List[str]:
+        """Pack accepted Terraform source files into bounded whole-file review prompts."""
+        batches: List[str] = []
+        current_items: List[Tuple[str, str]] = []
+
+        for filepath, content in sorted(tf_files.items()):
+            candidate_items = current_items + [(filepath, content)]
+            candidate_prompt = self.create_analysis_prompt(
+                dict(candidate_items), {}, [], resource_types, action_counts, providers,
+                mcp_insights, plan_context_note=plan_context_note
+            )
+
+            if len(candidate_prompt) <= self.config.target_prompt_chars:
+                current_items = candidate_items
+                continue
+
+            if not current_items:
+                if len(candidate_prompt) > self.config.max_prompt_chars:
+                    raise RuntimeError(
+                        f"Terraform source file '{filepath}' cannot fit within max-prompt-chars "
+                        f"({self.config.max_prompt_chars}) without splitting the file"
+                    )
+                current_items = candidate_items
+                continue
+
+            current_prompt = self.create_analysis_prompt(
+                dict(current_items), {}, [], resource_types, action_counts, providers,
+                mcp_insights, plan_context_note=plan_context_note
+            )
+            if len(current_prompt) > self.config.max_prompt_chars:
+                raise RuntimeError("A packed source review request exceeded max-prompt-chars")
+            batches.append(current_prompt)
+            current_items = [(filepath, content)]
+
+            single_file_prompt = self.create_analysis_prompt(
+                {filepath: content}, {}, [], resource_types, action_counts, providers,
+                mcp_insights, plan_context_note=plan_context_note
+            )
+            if len(single_file_prompt) > self.config.max_prompt_chars:
+                raise RuntimeError(
+                    f"Terraform source file '{filepath}' cannot fit within max-prompt-chars "
+                    f"({self.config.max_prompt_chars}) without splitting the file"
+                )
+
+        if current_items:
+            final_prompt = self.create_analysis_prompt(
+                dict(current_items), {}, [], resource_types, action_counts, providers,
+                mcp_insights, plan_context_note=plan_context_note
+            )
+            if len(final_prompt) > self.config.max_prompt_chars:
+                filepath = current_items[0][0]
+                raise RuntimeError(
+                    f"Terraform source file '{filepath}' cannot fit within max-prompt-chars "
+                    f"({self.config.max_prompt_chars}) without splitting the file"
+                )
+            batches.append(final_prompt)
+
+        return batches
+
+    def _build_plan_prompt_batches(self, plan_changes: List[Dict], resource_types: List[str],
+                                   action_counts: Dict[str, int], providers: List[str],
+                                   mcp_insights: Dict[str, Any],
+                                   source_context_note: Optional[str]) -> List[str]:
         """Pack all accepted resource evidence without exceeding public limits."""
         batches: List[str] = []
         current: List[Dict] = []
         for change in plan_changes:
             candidate = current + [change]
-            candidate_prompt = self.create_analysis_prompt(tf_files, {}, candidate, resource_types, action_counts, providers, mcp_insights)
+            candidate_prompt = self.create_analysis_prompt(
+                {}, {}, candidate, resource_types, action_counts, providers, mcp_insights,
+                source_context_note=source_context_note
+            )
             if len(candidate) <= self.config.max_resources_per_request and len(candidate_prompt) <= self.config.target_prompt_chars:
                 current = candidate
                 continue
@@ -1159,12 +1304,59 @@ Be practical and specific rather than generic. Focus on actionable insights that
                     raise RuntimeError(f"A single resource evidence item exceeds max-prompt-chars ({self.config.max_prompt_chars})")
                 current = candidate
                 continue
-            batches.append(self.create_analysis_prompt(tf_files, {}, current, resource_types, action_counts, providers, mcp_insights))
+            batches.append(self.create_analysis_prompt(
+                {}, {}, current, resource_types, action_counts, providers, mcp_insights,
+                source_context_note=source_context_note
+            ))
             current = [change]
-            if len(self.create_analysis_prompt(tf_files, {}, current, resource_types, action_counts, providers, mcp_insights)) > self.config.max_prompt_chars:
+            if len(self.create_analysis_prompt(
+                {}, {}, current, resource_types, action_counts, providers, mcp_insights,
+                source_context_note=source_context_note
+            )) > self.config.max_prompt_chars:
                 raise RuntimeError(f"A single resource evidence item exceeds max-prompt-chars ({self.config.max_prompt_chars})")
-        if current or not batches:
-            batches.append(self.create_analysis_prompt(tf_files, {}, current, resource_types, action_counts, providers, mcp_insights))
+        if current:
+            batches.append(self.create_analysis_prompt(
+                {}, {}, current, resource_types, action_counts, providers, mcp_insights,
+                source_context_note=source_context_note
+            ))
+        return batches
+
+    def build_prompt_batches(self, tf_files: Dict[str, str], plan_changes: List[Dict],
+                             resource_types: List[str], action_counts: Dict[str, int],
+                             providers: List[str], mcp_insights: Dict[str, Any]) -> List[str]:
+        """Pack accepted source and plan evidence into separate bounded review prompts."""
+        if tf_files and plan_changes:
+            combined_prompt = self.create_analysis_prompt(
+                tf_files, {}, plan_changes, resource_types, action_counts, providers, mcp_insights
+            )
+            if len(plan_changes) <= self.config.max_resources_per_request and len(combined_prompt) <= self.config.target_prompt_chars:
+                return [combined_prompt]
+
+        batches: List[str] = []
+
+        if tf_files:
+            batches.extend(self._build_source_prompt_batches(
+                tf_files, resource_types, action_counts, providers, mcp_insights,
+                plan_context_note=(
+                    "Detailed plan changes exist and are reviewed separately in other bounded requests."
+                    if plan_changes else None
+                )
+            ))
+
+        if plan_changes:
+            batches.extend(self._build_plan_prompt_batches(
+                plan_changes, resource_types, action_counts, providers, mcp_insights,
+                source_context_note=(
+                    "Terraform source files are reviewed separately in other bounded requests."
+                    if tf_files else None
+                )
+            ))
+
+        if not batches:
+            batches.append(self.create_analysis_prompt(
+                {}, {}, [], resource_types, action_counts, providers, mcp_insights
+            ))
+
         if any(len(prompt) > self.config.max_prompt_chars for prompt in batches):
             raise RuntimeError("A packed review request exceeded max-prompt-chars")
         return batches
@@ -1271,10 +1463,14 @@ Group findings by severity level. Include severity levels: 🔴 Critical, 🟡 W
                 )
                 
                 content = response.choices[0].message.content
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
                 if not isinstance(content, str) or not content.strip():
-                    finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
                     raise RuntimeError(
                         f"Foundry returned an empty completion (finish_reason={finish_reason})"
+                    )
+                if finish_reason != "stop":
+                    raise RuntimeError(
+                        f"Foundry returned an incomplete completion (finish_reason={finish_reason})"
                     )
                 return content
                 
@@ -1340,21 +1536,66 @@ Group findings by severity level. Include severity levels: 🔴 Critical, 🟡 W
             + evidence
         )
         if len(prompt) > self.config.max_prompt_chars:
+            if len(batch_reports) == 1:
+                raise RuntimeError(
+                    f"A single review report cannot fit within max-prompt-chars "
+                    f"({self.config.max_prompt_chars}) for merge"
+                )
             raise RuntimeError("Evidence reports exceed max-prompt-chars for the final merge")
         return prompt
+
+    def _merge_batch_reports(self, batch_reports: List[str]) -> str:
+        """Merge report batches in bounded passes until one final report remains."""
+        if not batch_reports:
+            raise RuntimeError("No review reports were produced for merge")
+
+        current_reports = list(batch_reports)
+        while len(current_reports) > 1:
+            merge_groups: List[List[str]] = []
+            current_group: List[str] = []
+
+            for report in current_reports:
+                candidate_group = current_group + [report]
+                try:
+                    self.create_merge_prompt(candidate_group)
+                except RuntimeError:
+                    if not current_group:
+                        raise
+                    merge_groups.append(current_group)
+                    current_group = [report]
+                    self.create_merge_prompt(current_group)
+                    continue
+
+                current_group = candidate_group
+
+            if current_group:
+                merge_groups.append(current_group)
+
+            if len(merge_groups) >= len(current_reports):
+                raise RuntimeError(
+                    "Bounded merge could not reduce review report count within max-prompt-chars; "
+                    "every remaining report only fits as a singleton merge prompt"
+                )
+
+            next_round: List[str] = []
+            for group in merge_groups:
+                if len(group) == 1:
+                    next_round.append(group[0])
+                    continue
+
+                next_round.append(self.analyse_with_ai(
+                    self.create_merge_prompt(group), max_completion_tokens=12000
+                ))
+
+            current_reports = next_round
+
+        return current_reports[0]
     
     def run_analysis(self) -> Dict[str, Any]:
         """Run the complete analysis"""
         print("Starting Terraform AI analysis...")
         
-        # Load Terraform plan
-        try:
-            with open(self.config.terraform_plan_path, 'r') as f:
-                plan_data = json.load(f)
-        except Exception as e:
-            error_msg = f"Error loading Terraform plan: {e}"
-            print(error_msg, file=sys.stderr)
-            return {"error": error_msg}
+        plan_data = self._load_terraform_plan()
         
         # Read Terraform files (unless in plan-only mode)
         if self.config.analysis_mode == "comprehensive":
@@ -1404,9 +1645,7 @@ Group findings by severity level. Include severity levels: 🔴 Critical, 🟡 W
             analyses.append(self.analyse_with_ai(
                 prompt, max_completion_tokens=4000 if len(prompts) > 1 else None
             ))
-        ai_analysis = analyses[0] if len(prompts) == 1 else self.analyse_with_ai(
-            self.create_merge_prompt(analyses), max_completion_tokens=12000
-        )
+        ai_analysis = analyses[0] if len(prompts) == 1 else self._merge_batch_reports(analyses)
         
         # Combine results
         final_analysis = f"## Terraform AI Plan Analysis\n\n"
@@ -1422,6 +1661,22 @@ Group findings by severity level. Include severity levels: 🔴 Critical, 🟡 W
             final_analysis += f"\n\n> Documentation enrichment unavailable: {detail}. The review continues using Terraform plan evidence.\n"
 
         summary = summarise_report(final_analysis, mcp_status=mcp_status)
+        severity_order = ("none", "warning", "critical")
+        highest_severity = max(
+            [summary["highest_severity"]]
+            + [summarise_report(report)["highest_severity"] for report in analyses],
+            key=severity_order.index,
+        )
+        if highest_severity != summary["highest_severity"]:
+            final_analysis += (
+                f"\n\n> Severity policy: {highest_severity} findings from evidence-batch reports "
+                "are retained for the gate even when consolidation omits or downgrades them.\n"
+            )
+        summary.update({
+            "highest_severity": highest_severity,
+            "has_issues": highest_severity != "none",
+            "has_critical_issues": highest_severity == "critical",
+        })
         summary.update({
             "providers_detected": providers,
             "resource_changes": len(normalised_changes),

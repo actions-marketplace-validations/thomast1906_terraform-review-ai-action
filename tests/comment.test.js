@@ -50,7 +50,7 @@ test('renders a capability fixture with its effective settings and coverage', ()
     report: '## Summary\nEvidence-backed security findings.',
     summary: {
       review_status: 'complete', resource_changes: 25, reviewed_resource_changes: 25,
-      review_batches: 1, source_files_included: 0, source_files_omitted: 0,
+      review_batches: 1, source_files_included: 6, source_files_omitted: 0,
       providers_detected: ['aws'], mcp_status: 'available',
       action_counts: { create: 25, update: 0, delete: 0, replace: 0 },
       review_configuration: {
@@ -66,6 +66,7 @@ test('renders a capability fixture with its effective settings and coverage', ()
   assert.match(section, /security, compliance, governance/);
   assert.match(section, /single-request/);
   assert.match(section, /25 \/ 25/);
+  assert.match(section, /Source evidence \| 6 included, 0 omitted/);
   assert.match(section, /MCP enrichment.*available/);
   assert.match(section, /Evidence-backed security findings/);
 });

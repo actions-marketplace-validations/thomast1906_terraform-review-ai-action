@@ -21,7 +21,7 @@ The request can contain:
 
 Comprehensive mode scans the configured source tree, not only pull-request changes.
 
-The action packs plan evidence into bounded Foundry requests and then consolidates it. Source limits can exclude files. Review the job logs before you rely on a report.
+The action packs plan and source evidence into bounded Foundry requests, then merges the reports. Source limits are hard caps. If a cap excludes a file, the action fails instead of returning a partial review. To reduce source evidence, select a narrower `terraform-directory`.
 
 ## Terraform plan value protection
 

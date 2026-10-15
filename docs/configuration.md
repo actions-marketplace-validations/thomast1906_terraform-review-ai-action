@@ -12,7 +12,7 @@
 
 | Input | Default | Description |
 |---|---:|---|
-| `terraform-plan-path` | `tfplan.json` | Path to `terraform show -json` output. |
+| `terraform-plan-path` | `tfplan.json` | Path to JSON output from a successful saved Terraform plan, not state JSON. |
 | `terraform-directory` | `.` | Source root read in comprehensive mode. |
 | `max-file-size-mb` | `10` | Maximum individual source file size. |
 | `max-total-size-mb` | `50` | Maximum combined source evidence size. |
@@ -23,6 +23,8 @@
 
 !!! info
     `plan-only` is the default. It sends only the plan delta, so it is faster, costs less, and sends less data. `comprehensive` is optional. It reads eligible `.tf` files below `terraform-directory`. It does not limit source to files that the pull request changed.
+
+    Source limits are hard caps. The action fails if a cap excludes a source file or if a file cannot fit in one request. It does not split source files. To reduce source evidence, select a narrower `terraform-directory`.
 
     The default target and maximum prompt budgets are 100,000 and 120,000 characters. Make sure that the selected Foundry deployment has enough context capacity for the request and response. A larger budget can increase latency and token cost.     A request-size or API failure fails the action.
 
@@ -87,7 +89,7 @@ The action writes the report before it enforces the gate. A failed job can still
 
 ```yaml
 - id: review
-  uses: thomast1906/terraform-ai-review-action@<commit-sha>
+  uses: thomast1906/terraform-review-ai-action@<commit-sha>
   with:
     foundry-api-key: ${{ secrets.FOUNDRY_API_KEY }}
     foundry-endpoint: ${{ secrets.FOUNDRY_ENDPOINT }}

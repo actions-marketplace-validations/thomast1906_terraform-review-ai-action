@@ -15,6 +15,8 @@ Then set:
 terraform-plan-path: tfplan.json
 ```
 
+The action rejects state JSON and plans with `errored: true`. Valid plans with no resource changes remain supported.
+
 ## Foundry input validation fails
 
 Make sure that each condition is true:
@@ -54,6 +56,8 @@ The action fails if it cannot create a complete report. A request-size error mea
 
 For an API failure, examine the sanitized job log. Confirm the Foundry deployment, endpoint access, timeout, and retry settings.
 
+The action rejects incomplete AI responses, even if they contain text. For `finish_reason=length`, use a smaller request target or a shorter review depth. A response limit is not a timeout.
+
 ## Reviews take too long or use too many tokens
 
 Use these settings:
@@ -64,7 +68,7 @@ analysis-preset: quick-check
 analysis-depth: quick
 ```
 
-For comprehensive mode, lower `max-files`, `max-file-size-mb`, or `max-total-size-mb`. These settings can exclude source files. For either mode, lower `max-resources-per-request` or `target-prompt-chars` to make smaller Foundry requests.
+For comprehensive mode, select a narrower `terraform-directory` to reduce source evidence. The file-count and size limits are hard caps. The action fails if these caps exclude files. For either mode, lower `max-resources-per-request` or `target-prompt-chars` to make smaller Foundry requests.
 
 ## Fork pull requests do not run
 
