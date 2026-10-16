@@ -10,7 +10,7 @@ Included changed plan values and, in comprehensive mode, bounded Terraform sourc
 
 ## Does comprehensive mode review only changed files?
 
-No. It reads eligible `.tf` files below `terraform-directory`, subject to source limits.
+No. It reads eligible `.tf` files below `terraform-directory`, subject to source limits. If a limit excludes a file, the action fails. It does not return a successful review with skipped files.
 
 ## Is Terraform MCP required?
 
@@ -30,4 +30,4 @@ Yes. Set `disable-pr-comment: true`. You can then omit `github-token` and `pull-
 
 ## How do I reduce runtime and token usage?
 
-Use `analysis-mode: plan-only`, `analysis-depth: quick`, and `analysis-preset: quick-check`. Reduce source limits if comprehensive mode includes more context than you need.
+Use `analysis-mode: plan-only`, `analysis-depth: quick`, and `analysis-preset: quick-check`. For comprehensive mode, select a narrower `terraform-directory` to reduce source evidence. Lower source limits cause a failure if they exclude files.

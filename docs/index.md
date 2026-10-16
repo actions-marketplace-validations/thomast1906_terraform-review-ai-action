@@ -30,7 +30,7 @@ jobs:
           terraform init -input=false
           terraform plan -input=false -out=tfplan.binary
           terraform show -json tfplan.binary > tfplan.json
-      - uses: thomast1906/terraform-ai-review-action@<commit-sha>
+      - uses: thomast1906/terraform-review-ai-action@<commit-sha>
         with:
           foundry-api-key: ${{ secrets.FOUNDRY_API_KEY }}
           foundry-endpoint: ${{ secrets.FOUNDRY_ENDPOINT }}
